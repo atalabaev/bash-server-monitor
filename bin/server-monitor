@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+# shellcheck source=../lib/cpu.sh
+source "$PROJECT_DIR/lib/cpu.sh"
+# shellcheck source=../lib/memory.sh
+source "$PROJECT_DIR/lib/memory.sh"
+# shellcheck source=../lib/disk.sh
+source "$PROJECT_DIR/lib/disk.sh"
+
+CPU_WARNING=80; CPU_CRITICAL=95
+RAM_WARNING=85; RAM_CRITICAL=95
+DISK_WARNING=90; DISK_CRITICAL=97
+LOAD_WARNING=1.5; LOAD_CRITICAL=3.0
+DISK_PATH=/
+CONFIG="$PROJECT_DIR/config/config.conf"
+QUIET=false
+VERSION=0.1.0
+usage() {
+  cat <<'HELP'
+Usage: ./bin/server-monitor [--config FILE] [--quiet] [--help] [--version]
+Checks: CPU, RAM, disk and 1-minute load average.
+Exit codes: 0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN/error.
+HELP
+}
+error() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
+trap 'error "Unexpected failure on line $LINENO"' ERR
+while (($#)); do
+  case "$1" in
+    --config) (($# >= 2)) || error '--config needs a path'; CONFIG="$2"; shift 2;;
+    --quiet) QUIET=true; shift;;
+    --help|-h) usage; exit 0;;
+    --version) echo "server-monitor $VERSION"; exit 0;;
+    *) error "Unknown option: $1";;
+  esac
+done
+if [[ -f "$CONFIG" ]]; then
+  # Config is shell syntax. Only source trusted local configuration files.
+  # shellcheck source=/dev/null
+  source "$CONFIG"
+elif [[ "$CONFIG" != "$PROJECT_DIR/config/config.conf" ]]; then
+  error "Config file not found: $CONFIG"
+fi
+[[ -r /proc/stat && -r /proc/meminfo ]] || error 'Linux /proc is required'
+[[ -d "$DISK_PATH" ]] || error "Disk path does not exist: $DISK_PATH"
+for var in CPU_WARNING CPU_CRITICAL RAM_WARNING RAM_CRITICAL DISK_WARNING DISK_CRITICAL; do
+  value="${!var}"
+  [[ "$value" =~ ^[0-9]+$ ]] && ((value >= 0 && value <= 100)) || error "Invalid $var: $value"
+done
+for metric in CPU RAM DISK; do
+  w="${metric}_WARNING"; c="${metric}_CRITICAL"
+  ((${!w} < ${!c})) || error "${metric}_WARNING must be less than ${metric}_CRITICAL"
+done
+for var in LOAD_WARNING LOAD_CRITICAL; do
+  [[ "${!var}" =~ ^[0-9]+([.][0-9]+)?$ ]] || error "Invalid $var: ${!var}"
+done
+awk -v w="$LOAD_WARNING" -v c="$LOAD_CRITICAL" 'BEGIN{exit !(w<c)}' || error 'LOAD_WARNING must be less than LOAD_CRITICAL'
+status=0
+report() {
+  local name="$1" value="$2" warning="$3" critical="$4" unit="$5" level=0 label=OK
+  if awk -v v="$value" -v t="$critical" 'BEGIN {exit !(v>=t)}'; then
+    level=2; label=CRITICAL
+  elif awk -v v="$value" -v t="$warning" 'BEGIN {exit !(v>=t)}'; then
+    level=1; label=WARNING
+  fi
+  ((level > status)) && status=$level || true
+  if [[ "$QUIET" == false || "$level" -ne 0 ]]; then
+    printf '%-8s %-8s %s%s\n' "$name" "$label" "$value" "$unit"
+  fi
+}
+if [[ "$QUIET" == false ]]; then
+  printf 'SERVER HEALTH REPORT | %s | %s\n' "$(hostname)" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+fi
+report CPU "$(cpu_usage)" "$CPU_WARNING" "$CPU_CRITICAL" '%'
+report RAM "$(ram_usage)" "$RAM_WARNING" "$RAM_CRITICAL" '%'
+report DISK "$(disk_usage "$DISK_PATH")" "$DISK_WARNING" "$DISK_CRITICAL" '%'
+load="$(awk '{print $1}' /proc/loadavg)"
+report LOAD "$load" "$LOAD_WARNING" "$LOAD_CRITICAL" ''
+exit "$status"

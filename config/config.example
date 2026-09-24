@@ -1,0 +1,10 @@
+# Copy to config/config.conf to customize; do not commit config.conf.
+CPU_WARNING=80
+CPU_CRITICAL=95
+RAM_WARNING=85
+RAM_CRITICAL=95
+DISK_WARNING=90
+DISK_CRITICAL=97
+LOAD_WARNING=1.5
+LOAD_CRITICAL=3.0
+DISK_PATH=/
