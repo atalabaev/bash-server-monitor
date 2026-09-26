@@ -78,17 +78,12 @@ if [[ -f "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
 fi
 
-# shellcheck source=../lib/cpu.sh
+# shellcheck disable=SC1091
 source "${PROJECT_DIR}/lib/cpu.sh"
-# shellcheck source=../lib/memory.sh
 source "${PROJECT_DIR}/lib/memory.sh"
-# shellcheck source=../lib/disk.sh
 source "${PROJECT_DIR}/lib/disk.sh"
-# shellcheck source=../lib/system.sh
 source "${PROJECT_DIR}/lib/system.sh"
-# shellcheck source=../lib/network.sh
 source "${PROJECT_DIR}/lib/network.sh"
-# shellcheck source=../lib/services.sh
 source "${PROJECT_DIR}/lib/services.sh"
 
 print_result() {
