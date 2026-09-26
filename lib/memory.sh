@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
-ram_usage() {
-  awk '/^MemTotal:/ {total=$2} /^MemAvailable:/ {available=$2} END {if (total > 0) printf "%.0f\n", (total-available)*100/total; else exit 1}' /proc/meminfo
+
+get_memory_usage() {
+    free | awk '/^Mem:/ {
+        if ($2 == 0) {
+            print 0
+        } else {
+            printf "%.0f", (($2-$7)/$2)*100
+        }
+    }'
 }
