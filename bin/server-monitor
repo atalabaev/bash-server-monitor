@@ -1,81 +1,201 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -uo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=../lib/cpu.sh
-source "$PROJECT_DIR/lib/cpu.sh"
-# shellcheck source=../lib/memory.sh
-source "$PROJECT_DIR/lib/memory.sh"
-# shellcheck source=../lib/disk.sh
-source "$PROJECT_DIR/lib/disk.sh"
+VERSION="0.2.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-CPU_WARNING=80; CPU_CRITICAL=95
-RAM_WARNING=85; RAM_CRITICAL=95
-DISK_WARNING=90; DISK_CRITICAL=97
-LOAD_WARNING=1.5; LOAD_CRITICAL=3.0
-DISK_PATH=/
-CONFIG="$PROJECT_DIR/config/config.conf"
+CONFIG_FILE="${PROJECT_DIR}/config/config.conf"
 QUIET=false
-VERSION=0.1.0
+OVERALL_STATUS=0
+
 usage() {
-  cat <<'HELP'
-Usage: ./bin/server-monitor [--config FILE] [--quiet] [--help] [--version]
-Checks: CPU, RAM, disk and 1-minute load average.
-Exit codes: 0 OK, 1 WARNING, 2 CRITICAL, 3 UNKNOWN/error.
-HELP
+    cat <<USAGE
+Usage: $0 [OPTIONS]
+
+Linux server health monitoring utility.
+
+Options:
+  --config FILE    Use custom configuration file
+  --quiet          Suppress normal output
+  --help           Show this help
+  --version        Show version
+
+Exit codes:
+  0 = OK
+  1 = WARNING
+  2 = CRITICAL
+USAGE
 }
-error() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
-trap 'error "Unexpected failure on line $LINENO"' ERR
-while (($#)); do
-  case "$1" in
-    --config) (($# >= 2)) || error '--config needs a path'; CONFIG="$2"; shift 2;;
-    --quiet) QUIET=true; shift;;
-    --help|-h) usage; exit 0;;
-    --version) echo "server-monitor $VERSION"; exit 0;;
-    *) error "Unknown option: $1";;
-  esac
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)
+            [[ $# -ge 2 ]] || {
+                echo "ERROR: --config requires a file" >&2
+                exit 2
+            }
+            CONFIG_FILE="$2"
+            shift 2
+            ;;
+        --quiet)
+            QUIET=true
+            shift
+            ;;
+        --help)
+            usage
+            exit 0
+            ;;
+        --version)
+            echo "server-monitor ${VERSION}"
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
 done
-if [[ -f "$CONFIG" ]]; then
-  # Config is shell syntax. Only source trusted local configuration files.
-  # shellcheck source=/dev/null
-  source "$CONFIG"
-elif [[ "$CONFIG" != "$PROJECT_DIR/config/config.conf" ]]; then
-  error "Config file not found: $CONFIG"
+
+# Defaults — may be overridden by config/environment.
+CPU_WARNING="${CPU_WARNING:-80}"
+RAM_WARNING="${RAM_WARNING:-85}"
+DISK_WARNING="${DISK_WARNING:-90}"
+INODE_WARNING="${INODE_WARNING:-90}"
+LOAD_WARNING="${LOAD_WARNING:-2}"
+NETWORK_HOST="${NETWORK_HOST:-1.1.1.1}"
+DNS_HOST="${DNS_HOST:-example.com}"
+CHECK_URL="${CHECK_URL:-http://localhost}"
+PROCESSES="${PROCESSES:-nginx}"
+SERVICES="${SERVICES:-nginx}"
+
+if [[ -f "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
 fi
-[[ -r /proc/stat && -r /proc/meminfo ]] || error 'Linux /proc is required'
-[[ -d "$DISK_PATH" ]] || error "Disk path does not exist: $DISK_PATH"
-for var in CPU_WARNING CPU_CRITICAL RAM_WARNING RAM_CRITICAL DISK_WARNING DISK_CRITICAL; do
-  value="${!var}"
-  [[ "$value" =~ ^[0-9]+$ ]] && ((value >= 0 && value <= 100)) || error "Invalid $var: $value"
-done
-for metric in CPU RAM DISK; do
-  w="${metric}_WARNING"; c="${metric}_CRITICAL"
-  ((${!w} < ${!c})) || error "${metric}_WARNING must be less than ${metric}_CRITICAL"
-done
-for var in LOAD_WARNING LOAD_CRITICAL; do
-  [[ "${!var}" =~ ^[0-9]+([.][0-9]+)?$ ]] || error "Invalid $var: ${!var}"
-done
-awk -v w="$LOAD_WARNING" -v c="$LOAD_CRITICAL" 'BEGIN{exit !(w<c)}' || error 'LOAD_WARNING must be less than LOAD_CRITICAL'
-status=0
-report() {
-  local name="$1" value="$2" warning="$3" critical="$4" unit="$5" level=0 label=OK
-  if awk -v v="$value" -v t="$critical" 'BEGIN {exit !(v>=t)}'; then
-    level=2; label=CRITICAL
-  elif awk -v v="$value" -v t="$warning" 'BEGIN {exit !(v>=t)}'; then
-    level=1; label=WARNING
-  fi
-  ((level > status)) && status=$level || true
-  if [[ "$QUIET" == false || "$level" -ne 0 ]]; then
-    printf '%-8s %-8s %s%s\n' "$name" "$label" "$value" "$unit"
-  fi
+
+# shellcheck source=../lib/cpu.sh
+source "${PROJECT_DIR}/lib/cpu.sh"
+# shellcheck source=../lib/memory.sh
+source "${PROJECT_DIR}/lib/memory.sh"
+# shellcheck source=../lib/disk.sh
+source "${PROJECT_DIR}/lib/disk.sh"
+# shellcheck source=../lib/system.sh
+source "${PROJECT_DIR}/lib/system.sh"
+# shellcheck source=../lib/network.sh
+source "${PROJECT_DIR}/lib/network.sh"
+# shellcheck source=../lib/services.sh
+source "${PROJECT_DIR}/lib/services.sh"
+
+print_result() {
+    local name="$1"
+    local status="$2"
+    local value="${3:-}"
+
+    if [[ "$QUIET" == false ]]; then
+        printf "%-12s %-10s %s\n" "$name" "$status" "$value"
+    fi
 }
+
+update_status() {
+    local code="$1"
+
+    if (( code > OVERALL_STATUS )); then
+        OVERALL_STATUS="$code"
+    fi
+}
+
+numeric_check() {
+    local name="$1"
+    local value="$2"
+    local warning="$3"
+
+    if (( value >= warning )); then
+        print_result "$name" "WARNING" "${value}%"
+        update_status 1
+    else
+        print_result "$name" "OK" "${value}%"
+    fi
+}
+
+trap 'echo "ERROR: monitor interrupted" >&2; exit 2' INT TERM
+
 if [[ "$QUIET" == false ]]; then
-  printf 'SERVER HEALTH REPORT | %s | %s\n' "$(hostname)" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    echo "SERVER HEALTH REPORT"
+    echo "Host: $(hostname)"
+    echo "Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    echo
 fi
-report CPU "$(cpu_usage)" "$CPU_WARNING" "$CPU_CRITICAL" '%'
-report RAM "$(ram_usage)" "$RAM_WARNING" "$RAM_CRITICAL" '%'
-report DISK "$(disk_usage "$DISK_PATH")" "$DISK_WARNING" "$DISK_CRITICAL" '%'
-load="$(awk '{print $1}' /proc/loadavg)"
-report LOAD "$load" "$LOAD_WARNING" "$LOAD_CRITICAL" ''
-exit "$status"
+
+CPU_USAGE="$(get_cpu_usage)"
+RAM_USAGE="$(get_memory_usage)"
+DISK_USAGE="$(get_disk_usage)"
+SWAP_USAGE="$(get_swap_usage)"
+INODE_USAGE="$(get_inode_usage)"
+LOAD_VALUE="$(awk '{print $1}' /proc/loadavg)"
+
+numeric_check "CPU" "$CPU_USAGE" "$CPU_WARNING"
+numeric_check "RAM" "$RAM_USAGE" "$RAM_WARNING"
+numeric_check "DISK" "$DISK_USAGE" "$DISK_WARNING"
+numeric_check "SWAP" "$SWAP_USAGE" 90
+numeric_check "INODES" "$INODE_USAGE" "$INODE_WARNING"
+
+if awk -v value="$LOAD_VALUE" -v warning="$LOAD_WARNING" \
+    'BEGIN {exit !(value >= warning)}'; then
+    print_result "LOAD" "WARNING" "$LOAD_VALUE"
+    update_status 1
+else
+    print_result "LOAD" "OK" "$LOAD_VALUE"
+fi
+
+if NETWORK_RESULT="$(get_network_status)"; then
+    NETWORK_CODE=0
+else
+    NETWORK_CODE=$?
+fi
+print_result "NETWORK" "$NETWORK_RESULT" "$NETWORK_HOST"
+update_status "$NETWORK_CODE"
+
+if DNS_RESULT="$(get_dns_status)"; then
+    DNS_CODE=0
+else
+    DNS_CODE=$?
+fi
+print_result "DNS" "$DNS_RESULT" "$DNS_HOST"
+update_status "$DNS_CODE"
+
+for process in $PROCESSES; do
+    PROCESS_RESULT="$(check_process "$process")"
+    PROCESS_CODE=$?
+    print_result "PROCESS" "$PROCESS_RESULT" "$process"
+    update_status "$PROCESS_CODE"
+done
+
+for service in $SERVICES; do
+    SERVICE_RESULT="$(check_service "$service")"
+    SERVICE_CODE=$?
+    print_result "SERVICE" "$SERVICE_RESULT" "$service"
+    update_status "$SERVICE_CODE"
+done
+
+DOCKER_RESULT="$(check_docker)"
+DOCKER_CODE=$?
+print_result "DOCKER" "$DOCKER_RESULT"
+update_status "$DOCKER_CODE"
+
+HTTP_RESULT="$(check_http "$CHECK_URL")"
+HTTP_CODE=$?
+print_result "HTTP" "$HTTP_RESULT" "$CHECK_URL"
+update_status "$HTTP_CODE"
+
+if [[ "$QUIET" == false ]]; then
+    echo
+    case "$OVERALL_STATUS" in
+        0) echo "Overall status: OK" ;;
+        1) echo "Overall status: WARNING" ;;
+        2) echo "Overall status: CRITICAL" ;;
+    esac
+fi
+
+exit "$OVERALL_STATUS"
