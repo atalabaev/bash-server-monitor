@@ -3,6 +3,7 @@ CPU_WARNING=80
 RAM_WARNING=85
 DISK_WARNING=90
 INODE_WARNING=90
+SWAP_WARNING=90
 LOAD_WARNING=2
 
 # Connectivity
@@ -15,3 +16,12 @@ CHECK_URL=http://localhost
 # Space-separated process/service names
 PROCESSES="nginx"
 SERVICES="nginx"
+
+
+# Logging
+LOG_FILE=/tmp/server-monitor.log
+
+# Optional generic webhook.
+# Keep the real URL outside Git. Example:
+# export WEBHOOK_URL="https://your-webhook.example/..."
+WEBHOOK_URL=""

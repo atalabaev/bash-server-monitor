@@ -63,6 +63,9 @@ CPU_WARNING="${CPU_WARNING:-80}"
 RAM_WARNING="${RAM_WARNING:-85}"
 DISK_WARNING="${DISK_WARNING:-90}"
 INODE_WARNING="${INODE_WARNING:-90}"
+SWAP_WARNING="${SWAP_WARNING:-90}"
+LOG_FILE="${LOG_FILE:-/tmp/server-monitor.log}"
+WEBHOOK_URL="${WEBHOOK_URL:-}"
 LOAD_WARNING="${LOAD_WARNING:-2}"
 NETWORK_HOST="${NETWORK_HOST:-1.1.1.1}"
 DNS_HOST="${DNS_HOST:-example.com}"
@@ -119,6 +122,56 @@ numeric_check() {
     fi
 }
 
+
+log_result() {
+    local status_text timestamp
+
+    timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+    case "$OVERALL_STATUS" in
+        0) status_text="OK" ;;
+        1) status_text="WARNING" ;;
+        2) status_text="CRITICAL" ;;
+        *) status_text="UNKNOWN" ;;
+    esac
+
+    printf '%s host=%s status=%s exit_code=%s\n' \
+        "$timestamp" "$(hostname)" "$status_text" "$OVERALL_STATUS" \
+        >> "$LOG_FILE" 2>/dev/null || \
+        echo "WARNING: unable to write log file: $LOG_FILE" >&2
+}
+
+send_webhook_alert() {
+    [[ "$OVERALL_STATUS" -eq 0 ]] && return 0
+    [[ -z "$WEBHOOK_URL" ]] && return 0
+
+    local status_text payload
+
+    case "$OVERALL_STATUS" in
+        1) status_text="WARNING" ;;
+        2) status_text="CRITICAL" ;;
+        *) status_text="UNKNOWN" ;;
+    esac
+
+    payload=$(printf \
+        '{"host":"%s","status":"%s","exit_code":%d,"timestamp":"%s"}' \
+        "$(hostname)" \
+        "$status_text" \
+        "$OVERALL_STATUS" \
+        "$(date -u +"%Y-%m-%dT%H:%M:%SZ")")
+
+    if ! curl -fsS \
+        --connect-timeout 3 \
+        --max-time 5 \
+        -H "Content-Type: application/json" \
+        -X POST \
+        -d "$payload" \
+        "$WEBHOOK_URL" >/dev/null 2>&1; then
+        echo "WARNING: webhook delivery failed" >&2
+        return 1
+    fi
+}
+
 trap 'echo "ERROR: monitor interrupted" >&2; exit 2' INT TERM
 
 if [[ "$QUIET" == false ]]; then
@@ -138,7 +191,7 @@ LOAD_VALUE="$(awk '{print $1}' /proc/loadavg)"
 numeric_check "CPU" "$CPU_USAGE" "$CPU_WARNING"
 numeric_check "RAM" "$RAM_USAGE" "$RAM_WARNING"
 numeric_check "DISK" "$DISK_USAGE" "$DISK_WARNING"
-numeric_check "SWAP" "$SWAP_USAGE" 90
+numeric_check "SWAP" "$SWAP_USAGE" "$SWAP_WARNING"
 numeric_check "INODES" "$INODE_USAGE" "$INODE_WARNING"
 
 if awk -v value="$LOAD_VALUE" -v warning="$LOAD_WARNING" \
@@ -197,5 +250,8 @@ if [[ "$QUIET" == false ]]; then
         2) echo "Overall status: CRITICAL" ;;
     esac
 fi
+
+log_result
+send_webhook_alert || true
 
 exit "$OVERALL_STATUS"
